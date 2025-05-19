@@ -47,7 +47,7 @@ def get_all_data_joined(conn: duckdb.DuckDBPyConnection):
         AS
             SELECT 
                 *,
-                CONCAT_WS(' - ', "Товарная группа 1", "Товарная группа 2", "Товарная группа 3") AS "Id группы"
+                CONCAT_WS(' - ', "Товарная группа 1", "Товарная группа 2", "Товарная группа 3") AS group_id
             FROM sales 
                 LEFT JOIN products p USING("Id номенклатуры в лояльности")
                 LEFT JOIN sale_points s USING("Id магазина в лояльности")
@@ -56,27 +56,141 @@ def get_all_data_joined(conn: duckdb.DuckDBPyConnection):
     conn.execute(q)
 
 
-def calc_clients(conn: duckdb.DuckDBPyConnection):
+def calc_clients_coefficients(conn: duckdb.DuckDBPyConnection):
     q = """
-    COPY (
+    CREATE OR REPLACE TABLE data_clients_coeffs AS (
         WITH card_stats AS (
             SELECT 
-                "Id карты", 
-                SUM("Кол-во товара") as prod_count
-            FROM data 
+                "Id карты" as card_id, 
+                SUM("Кол-во товара") as prod_count,
+                SUM("Сумма") as buy_sum,
+                COUNT(DISTINCT strftime("Дата", '%Y-%m')) as month_count,
+                COUNT(DISTINCT CONCAT_WS(' - ',  strftime("Дата", '%Y-%m'), "Временной диапазон")) as visits_count,
+                visits_count / month_count as monthly_visits_count
+            FROM data
+            WHERE "Тип чека" = 'Продажа'
             GROUP BY "Id карты"
         ),
         overall_avg AS (
-            SELECT AVG(prod_count) as avg_prod_count
+            SELECT 
+                AVG(prod_count) as avg_prod_count,
+                AVG(monthly_visits_count) as avg_monthly_visits_count,
+                AVG(buy_sum) as avg_buy_sum,
             FROM card_stats
         )
         SELECT
-            cs."Id карты",
+            cs.card_id,
             cs.prod_count,
-            2 * cs.prod_count / oa.avg_prod_count as ratio_to_avg
+            cs.buy_sum,
+            cs.monthly_visits_count,
+            cs.buy_sum / cs.visits_count as avg_buy,
+            2 * cs.prod_count / oa.avg_prod_count as prod_count_coeff,
+            2 * cs.monthly_visits_count / oa.avg_monthly_visits_count as visits_count_coeff,
+            2 * cs.buy_sum / oa.avg_buy_sum as buy_sum_coeff,
+            prod_count_coeff + visits_count_coeff + buy_sum_coeff as group_coeff,
+            '' as cluster_name
         FROM card_stats cs
         CROSS JOIN overall_avg oa
-    ) TO 'output.csv' (HEADER, DELIMITER ';');
+    );
+    """
+    conn.execute(q)
+
+
+def set_clients_clusters(conn: duckdb.DuckDBPyConnection):
+    q = """
+        UPDATE 
+            data_clients_coeffs 
+        SET cluster_name =
+            CASE
+                WHEN group_coeff BETWEEN 3 AND 5 THEN '2 Редкие/ низ чек'
+                WHEN group_coeff BETWEEN 5 AND 7 THEN '3 Умеренные'
+                WHEN group_coeff BETWEEN 7 AND 10 THEN '4 Частые/ выс чек'
+                WHEN group_coeff BETWEEN 10 AND 20 THEN '5 Постоянные'
+                WHEN group_coeff > 20 THEN '6 Лояльные/ выс чек'
+                ELSE '1 Разовые/низ чек'
+            END
+    """
+    conn.execute(q)
+
+
+def calc_products_coefficients(conn: duckdb.DuckDBPyConnection):
+    q = """
+        CREATE OR REPLACE TABLE data_products_coeffs AS (
+            WITH overall_stats AS (
+                SELECT 
+                    COUNT(DISTINCT "Id чека") tx_count
+                FROM data 
+            ),
+            product_stats AS (
+                SELECT
+                    group_id,
+                    "Id номенклатуры в лояльности" as product_id,
+                    COUNT(*) as freq,
+                    freq / os.tx_count as hit_rate
+                FROM data
+                CROSS JOIN overall_stats AS os
+                GROUP BY group_id, "Id номенклатуры в лояльности", os.tx_count
+            ),
+            product_stats_averages AS (
+                SELECT
+                    AVG(freq) as avg_freq,
+                    AVG(hit_rate) as avg_hit_rate
+                FROM product_stats
+            )
+            SELECT
+                group_id,
+                product_id,
+                freq,
+                hit_rate,
+                freq / osa.avg_freq as freq_coeff,
+                hit_rate / osa.avg_hit_rate as hit_rate_coeff,
+                freq_coeff + hit_rate_coeff as summ_coeff,
+                '' as rank
+            FROM product_stats ps
+            CROSS JOIN product_stats_averages osa
+        );
+    """
+    conn.execute(q)
+
+
+def set_products_ranks(conn: duckdb.DuckDBPyConnection):
+    q = """
+        UPDATE
+            data_products_coeffs
+        SET rank =
+            CASE
+                WHEN summ_coeff BETWEEN 0.3 AND 1 THEN '2'
+                WHEN summ_coeff BETWEEN 1 AND 3 THEN '3'
+                WHEN summ_coeff BETWEEN 3 AND 7 THEN '4'
+                WHEN summ_coeff BETWEEN 7 AND 15 THEN '5'
+                WHEN summ_coeff BETWEEN 15 AND 50 THEN '6'
+                WHEN summ_coeff > 50 THEN '7'
+                ELSE '1'
+            END
+    """
+    conn.execute(q)
+
+
+def join_client_product_coeffs(conn: duckdb.DuckDBPyConnection):
+    q = """
+        CREATE OR REPLACE TABLE data_coeffs AS (
+            SELECT 
+                d.* ,
+                c.cluster_name,
+                p.rank
+            FROM data d
+                LEFT JOIN data_clients_coeffs c ON d."Id карты" = c.card_id
+                LEFT JOIN data_products_coeffs p ON d."Id номенклатуры в лояльности" = p.product_id
+        )
+    """
+    conn.execute(q)
+
+
+def save_data_to_csv(conn: duckdb.DuckDBPyConnection):
+    q = """
+        COPY data_clients_coeffs TO 'output_clients.csv' (HEADER, DELIMITER ';');
+        COPY data_products_coeffs TO 'output_products.csv' (HEADER, DELIMITER ';');
+        COPY data_coeffs TO 'output.csv' (HEADER, DELIMITER ';');
     """
     conn.execute(q)
 
@@ -88,7 +202,7 @@ def main(load_files: bool):
         load_files_to_duckdb(
             paths=['static/input_sales/1-8.csv', 'static/input_sales/9-16.csv', 'static/input_sales/17-22.csv',
                    'static/input_sales/23-31.csv'],
-            db_connection=conn, table_name="sales", types={"PropProgramKey": "VARCHAR"}
+            db_connection=conn, table_name="sales", types={"PropProgramKey": "VARCHAR", "Кол-во товара": "DOUBLE", "Сумма": "DOUBLE"}
         )
         load_files_to_duckdb(
             paths=['static/references/clients.csv'], db_connection=conn, table_name="clients", nullstr='-'
@@ -99,10 +213,26 @@ def main(load_files: bool):
         load_files_to_duckdb(
             paths=['static/references/sale_points.csv'], db_connection=conn, table_name="sale_points"
         )
+        print('Joining tables...')
         get_all_data_joined(conn)
 
-    print('Joining tables...')
-    calc_clients(conn)
+    print('Calculating clients coefficients...')
+    calc_clients_coefficients(conn)
+
+    print('Setting clients clusters...')
+    set_clients_clusters(conn)
+
+    print('Calculating products coefficients...')
+    calc_products_coefficients(conn)
+
+    print('Setting products ranks...')
+    set_products_ranks(conn)
+
+    print('Joining coeffs into data...')
+    join_client_product_coeffs(conn)
+
+    print('Saving data...')
+    save_data_to_csv(conn)
     conn.close()
 
 
