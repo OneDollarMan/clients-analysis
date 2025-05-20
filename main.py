@@ -117,9 +117,9 @@ def calc_products_coefficients(conn: duckdb.DuckDBPyConnection):
     q = """
         CREATE OR REPLACE TABLE data_products_coeffs AS (
             WITH overall_stats AS (
-                SELECT 
+                SELECT
                     COUNT(DISTINCT "Id чека") tx_count
-                FROM data 
+                FROM data
             ),
             product_stats AS (
                 SELECT
@@ -171,28 +171,104 @@ def set_products_ranks(conn: duckdb.DuckDBPyConnection):
     conn.execute(q)
 
 
+clusters = ['cluster1', 'cluster2', 'cluster3', 'cluster4', 'cluster5', 'cluster6']
+
+
 def join_client_product_coeffs(conn: duckdb.DuckDBPyConnection):
-    q = """
+    q = f"""
         CREATE OR REPLACE TABLE data_coeffs AS (
-            SELECT 
-                d.* ,
-                c.cluster_name,
-                p.rank
+            SELECT
+                d.group_id,
+                p.product_id,
+                p.rank,
+                COUNT(DISTINCT c.cluster_name) AS unique_cluster_count,
+                SUM(CASE WHEN c.cluster_name = '1 Разовые/низ чек' THEN 1 ELSE 0 END) as {clusters[0]},
+                SUM(CASE WHEN c.cluster_name = '2 Редкие/ низ чек' THEN 1 ELSE 0 END) as {clusters[1]},
+                SUM(CASE WHEN c.cluster_name = '3 Умеренные' THEN 1 ELSE 0 END) as {clusters[2]},
+                SUM(CASE WHEN c.cluster_name = '4 Частые/ выс чек' THEN 1 ELSE 0 END) as {clusters[3]},
+                SUM(CASE WHEN c.cluster_name = '5 Постоянные' THEN 1 ELSE 0 END) as {clusters[4]},
+                SUM(CASE WHEN c.cluster_name = '6 Лояльные/ выс чек' THEN 1 ELSE 0 END) as {clusters[5]},
+                CONCAT_WS('_', p.rank, unique_cluster_count) AS rank_cross
             FROM data d
                 LEFT JOIN data_clients_coeffs c ON d."Id карты" = c.card_id
                 LEFT JOIN data_products_coeffs p ON d."Id номенклатуры в лояльности" = p.product_id
-        )
+            GROUP BY d.group_id, p.product_id, p.rank
+        );
     """
     conn.execute(q)
+
+
+def calc_product_cluster_rank(conn: duckdb.DuckDBPyConnection):
+    for cluster in clusters:
+        q = f"""
+            CREATE OR REPLACE TABLE data_{cluster} AS (
+                WITH group_stats AS (
+                    SELECT
+                        group_id,
+                        SUM({cluster}) as sum_cluster
+                    FROM data_coeffs
+                    GROUP BY group_id
+                ),
+                product_cluster_data AS (
+                    SELECT
+                        group_id,
+                        product_id,
+                        {cluster},
+                        {cluster} / os.sum_cluster as share_cluster
+                    FROM data_coeffs d
+                        JOIN group_stats os USING(group_id)
+                    WHERE {cluster} > 0
+                ),
+                product_cluster_averages AS (
+                    SELECT
+                        AVG({cluster}) as avg_cluster,
+                        AVG(share_cluster) as avg_share_cluster
+                    FROM product_cluster_data
+                )
+                SELECT 
+                    d.*,
+                    2 * d.{cluster} / a.avg_cluster as cluster_coeff,
+                    2 * d.share_cluster / a.avg_share_cluster as share_cluster_coeff,
+                    cluster_coeff + share_cluster_coeff as summ_cluster_coeff,
+                    '' as {cluster}_rank
+                FROM product_cluster_data d
+                    CROSS JOIN product_cluster_averages a
+                ORDER BY summ_cluster_coeff DESC
+            );
+        """
+        conn.execute(q)
+
+
+def set_product_cluster_ranks(conn: duckdb.DuckDBPyConnection):
+    for cluster in clusters:
+        q = f"""
+                UPDATE
+                    data_{cluster}
+                SET {cluster}_rank =
+                        CASE
+                            WHEN summ_cluster_coeff BETWEEN 1 AND 2 THEN '2'
+                            WHEN summ_cluster_coeff BETWEEN 2 AND 3 THEN '3'
+                            WHEN summ_cluster_coeff BETWEEN 3 AND 5 THEN '4'
+                            WHEN summ_cluster_coeff BETWEEN 5 AND 10 THEN '5'
+                            WHEN summ_cluster_coeff BETWEEN 10 AND 50 THEN '6'
+                            WHEN summ_cluster_coeff > 50 THEN '7'
+                            ELSE '1'
+                            END
+                """
+        conn.execute(q)
 
 
 def save_data_to_csv(conn: duckdb.DuckDBPyConnection):
     q = """
-        COPY data_clients_coeffs TO 'output_clients.csv' (HEADER, DELIMITER ';');
-        COPY data_products_coeffs TO 'output_products.csv' (HEADER, DELIMITER ';');
-        COPY data_coeffs TO 'output.csv' (HEADER, DELIMITER ';');
+        COPY data_clients_coeffs TO 'output_client_coeffs.csv' (HEADER, DELIMITER ';');
+        COPY data_products_coeffs TO 'output_product_coeffs.csv' (HEADER, DELIMITER ';');
+        COPY data_coeffs TO 'output_coeffs.csv' (HEADER, DELIMITER ';');
     """
     conn.execute(q)
+
+    for cluster in clusters:
+        q = f"""COPY data_{cluster} TO 'output_{cluster}.csv' (HEADER, DELIMITER ';');"""
+        conn.execute(q)
 
 
 def main(load_files: bool):
@@ -230,6 +306,12 @@ def main(load_files: bool):
 
     print('Joining coeffs into data...')
     join_client_product_coeffs(conn)
+
+    print('Calculating product cluster ranks...')
+    calc_product_cluster_rank(conn)
+
+    print('Setting product cluster ranks...')
+    set_product_cluster_ranks(conn)
 
     print('Saving data...')
     save_data_to_csv(conn)
