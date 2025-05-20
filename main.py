@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import List
 import duckdb
@@ -259,15 +260,18 @@ def set_product_cluster_ranks(conn: duckdb.DuckDBPyConnection):
 
 
 def save_data_to_csv(conn: duckdb.DuckDBPyConnection):
+    if not os.path.exists('res'):
+        os.mkdir('res')
+
     q = """
-        COPY data_clients_coeffs TO 'output_client_coeffs.csv' (HEADER, DELIMITER ';');
-        COPY data_products_coeffs TO 'output_product_coeffs.csv' (HEADER, DELIMITER ';');
-        COPY data_coeffs TO 'output_coeffs.csv' (HEADER, DELIMITER ';');
+        COPY data_clients_coeffs TO 'res/output_clients_coeffs.csv' (HEADER, DELIMITER ';');
+        COPY data_products_coeffs TO 'res/output_products_coeffs.csv' (HEADER, DELIMITER ';');
+        COPY data_coeffs TO 'res/output_coeffs.csv' (HEADER, DELIMITER ';');
     """
     conn.execute(q)
 
     for cluster in clusters:
-        q = f"""COPY data_{cluster} TO 'output_{cluster}.csv' (HEADER, DELIMITER ';');"""
+        q = f"""COPY data_{cluster} TO 'res/output_{cluster}.csv' (HEADER, DELIMITER ';');"""
         conn.execute(q)
 
 
