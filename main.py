@@ -259,6 +259,145 @@ def set_product_cluster_ranks(conn: duckdb.DuckDBPyConnection):
         conn.execute(q)
 
 
+def calc_products_by_price(conn: duckdb.DuckDBPyConnection):
+    q = """
+        CREATE OR REPLACE TABLE product_price_coeffs AS (
+            WITH group1_agg AS (
+                SELECT 
+                    "Товарная группа 1" as group1_id,
+                    COUNT(*) as group1_products_count,
+                    SUM("Стоимость товара" / "Вес товара") / group1_products_count as group1_price_kg
+                FROM data
+                GROUP BY "Товарная группа 1"
+            ),
+            group2_agg AS (
+                SELECT 
+                    "Товарная группа 1" as group1_id,
+                    "Товарная группа 2" as group2_id,
+                    COUNT(*) as group2_products_count,
+                    SUM("Стоимость товара" / "Вес товара") / group2_products_count as group2_price_kg
+                FROM data
+                GROUP BY "Товарная группа 1", "Товарная группа 2"
+            ),
+            group3_agg AS (
+                SELECT 
+                    "Товарная группа 1" as group1_id,
+                    "Товарная группа 2" as group2_id,
+                    "Товарная группа 3" as group3_id,
+                    COUNT(*) as group3_products_count,
+                    SUM("Стоимость товара" / "Вес товара") / group3_products_count as group3_price_kg
+                FROM data
+                GROUP BY "Товарная группа 1", "Товарная группа 2", "Товарная группа 3"
+            ),
+            product_prices AS (
+                SELECT
+                    "Id номенклатуры в лояльности" as product_id,
+                    AVG("Стоимость товара") as price
+                FROM data
+                GROUP BY "Id номенклатуры в лояльности"
+            )
+            SELECT
+                "Товарная группа 1" as group1_id,
+                "Товарная группа 2" as group2_id,
+                "Товарная группа 3" as group3_id,
+                "Id номенклатуры в лояльности" as product_id,
+                pp.price,
+                "Вес товара" as weight,
+                pp.price / weight as price_kg,
+                g1.group1_price_kg,
+                g2.group2_price_kg,
+                g3.group3_price_kg,
+                g3.group3_products_count,
+                CASE
+                    WHEN g3.group3_products_count > 6 THEN price_kg / g3.group3_price_kg
+                    WHEN g3.group3_products_count BETWEEN 3 AND 6 THEN price_kg / g2.group2_price_kg
+                    ELSE price_kg / g1.group1_price_kg
+                END as price_kg_coeff,
+                '' as price_segment
+            FROM products p
+                LEFT JOIN group3_agg g3 ON p."Товарная группа 1" = g3.group1_id AND p."Товарная группа 2" = g3.group2_id AND p."Товарная группа 3" = g3.group3_id
+                LEFT JOIN group2_agg g2 ON p."Товарная группа 1" = g2.group1_id AND p."Товарная группа 2" = g2.group2_id
+                LEFT JOIN group1_agg g1 ON p."Товарная группа 1" = g1.group1_id
+                LEFT JOIN product_prices pp ON p."Id номенклатуры в лояльности" = pp.product_id
+            ORDER BY price_kg_coeff DESC
+        );
+    """
+    conn.execute(q)
+
+
+def set_products_by_price_ranks(conn: duckdb.DuckDBPyConnection):
+    q = """
+        UPDATE
+            product_price_coeffs
+        SET price_segment =
+            CASE
+                WHEN price_kg_coeff BETWEEN 0 AND 1.7 THEN 'Низкий'
+                WHEN price_kg_coeff BETWEEN 1.7 AND 2.6 THEN 'Средний'
+                WHEN price_kg_coeff BETWEEN 2.6 AND 10 THEN 'Высокий'
+                WHEN price_kg_coeff > 10 THEN 'Максимальный'
+                ELSE ''
+            END
+    """
+    conn.execute(q)
+
+
+def calc_clients_by_price(conn: duckdb.DuckDBPyConnection):
+    q = """
+        CREATE OR REPLACE TABLE client_price_coeffs AS (
+            SELECT
+                "Id карты" as client_id,
+                COUNT(*) as product_count,
+                SUM(CASE WHEN ppc.price_segment = 'Низкий' THEN 1 ELSE 0 END) / product_count as low_segment_share,
+                SUM(CASE WHEN ppc.price_segment = 'Средний' THEN 1 ELSE 0 END) / product_count as middle_segment_share,
+                SUM(CASE WHEN ppc.price_segment = 'Высокий' THEN 1 ELSE 0 END) / product_count as high_segment_share,
+                SUM(CASE WHEN ppc.price_segment = 'Максимальный' THEN 1 ELSE 0 END) / product_count as max_segment_share,
+                CASE
+                    WHEN low_segment_share > 0.3 THEN 'Низкий'
+                    WHEN high_segment_share + max_segment_share > 0.5 THEN 'Высокий'
+                    ELSE 'Средний'
+                END as price_segment
+            FROM data d
+                LEFT JOIN product_price_coeffs ppc ON d."Id номенклатуры в лояльности" = ppc.product_id
+            GROUP BY "Id карты"
+        );
+    """
+    conn.execute(q)
+
+
+def calc_sale_points_clients_segments(conn: duckdb.DuckDBPyConnection):
+    q = """
+        CREATE OR REPLACE TABLE sale_points_segments AS (
+            WITH sale_points_stats AS (
+                SELECT
+                    "Id магазина в лояльности" as sale_point_id,
+                    COUNT(DISTINCT "Id карты") as overall_clients_count
+                FROM data
+                GROUP BY "Id магазина в лояльности"
+            ),
+            segmented_counts AS (
+                SELECT
+                    d."Id магазина в лояльности" as sale_point_id,
+                    s.overall_clients_count,
+                    cpc.price_segment,
+                    COUNT(DISTINCT d."Id карты") as clients_count
+                FROM data d
+                LEFT JOIN client_price_coeffs cpc ON d."Id карты" = cpc.client_id
+                LEFT JOIN sale_points_stats s ON d."Id магазина в лояльности" = s.sale_point_id
+                GROUP BY d."Id магазина в лояльности", s.overall_clients_count, cpc.price_segment
+            )
+            SELECT
+                sale_point_id as "Id магазина в лояльности",
+                ROUND(SUM(CASE WHEN price_segment = 'Низкий' THEN clients_count ELSE 0 END) * 100.0 / overall_clients_count, 2) as "Низкий",
+                ROUND(SUM(CASE WHEN price_segment = 'Средний' THEN clients_count ELSE 0 END) * 100.0 / overall_clients_count, 2) as "Средний",
+                ROUND(SUM(CASE WHEN price_segment = 'Высокий' THEN clients_count ELSE 0 END) * 100.0 / overall_clients_count, 2) as "Высокий"
+            FROM segmented_counts
+            GROUP BY sale_point_id, overall_clients_count
+            ORDER BY sale_point_id
+        )
+    """
+    conn.execute(q)
+
+
 def save_data_to_csv(conn: duckdb.DuckDBPyConnection):
     if not os.path.exists('res'):
         os.mkdir('res')
@@ -267,6 +406,9 @@ def save_data_to_csv(conn: duckdb.DuckDBPyConnection):
         COPY data_clients_coeffs TO 'res/output_clients_coeffs.csv' (HEADER, DELIMITER ';');
         COPY data_products_coeffs TO 'res/output_products_coeffs.csv' (HEADER, DELIMITER ';');
         COPY data_coeffs TO 'res/output_coeffs.csv' (HEADER, DELIMITER ';');
+        COPY product_price_coeffs TO 'res/output_products_price_coeffs.csv' (HEADER, DELIMITER ';');
+        COPY client_price_coeffs TO 'res/output_clients_price_coeffs.csv' (HEADER, DELIMITER ';');
+        COPY sale_points_segments TO 'res/output_sale_points_segments.csv' (HEADER, DELIMITER ';');
     """
     conn.execute(q)
 
@@ -282,13 +424,13 @@ def main(load_files: bool):
         load_files_to_duckdb(
             paths=['static/input_sales/1-8.csv', 'static/input_sales/9-16.csv', 'static/input_sales/17-22.csv',
                    'static/input_sales/23-31.csv'],
-            db_connection=conn, table_name="sales", types={"PropProgramKey": "VARCHAR", "Кол-во товара": "DOUBLE", "Сумма": "DOUBLE"}
+            db_connection=conn, table_name="sales", types={"PropProgramKey": "VARCHAR", "Кол-во товара": "DOUBLE", "Сумма": "DOUBLE", "Стоимость товара": "DOUBLE"}
         )
         load_files_to_duckdb(
             paths=['static/references/clients.csv'], db_connection=conn, table_name="clients", nullstr='-'
         )
         load_files_to_duckdb(
-            paths=['static/references/products.csv'], db_connection=conn, table_name="products"
+            paths=['static/references/products.csv'], db_connection=conn, table_name="products", types={"Вес товара": "DOUBLE"}
         )
         load_files_to_duckdb(
             paths=['static/references/sale_points.csv'], db_connection=conn, table_name="sale_points"
@@ -298,14 +440,10 @@ def main(load_files: bool):
 
     print('Calculating clients coefficients...')
     calc_clients_coefficients(conn)
-
-    print('Setting clients clusters...')
     set_clients_clusters(conn)
 
     print('Calculating products coefficients...')
     calc_products_coefficients(conn)
-
-    print('Setting products ranks...')
     set_products_ranks(conn)
 
     print('Joining coeffs into data...')
@@ -313,9 +451,17 @@ def main(load_files: bool):
 
     print('Calculating product cluster ranks...')
     calc_product_cluster_rank(conn)
-
-    print('Setting product cluster ranks...')
     set_product_cluster_ranks(conn)
+
+    print('Calculating products by price...')
+    calc_products_by_price(conn)
+    set_products_by_price_ranks(conn)
+
+    print('Calculating clients by price...')
+    calc_clients_by_price(conn)
+
+    print('Calculating sale points clients segments...')
+    calc_sale_points_clients_segments(conn)
 
     print('Saving data...')
     save_data_to_csv(conn)
