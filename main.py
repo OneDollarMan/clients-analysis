@@ -150,7 +150,8 @@ def calc_products_coefficients(conn: duckdb.DuckDBPyConnection):
                 2 * freq / osa.avg_freq as freq_coeff,
                 2 * hit_rate / osa.avg_hit_rate as hit_rate_coeff,
                 freq_coeff + hit_rate_coeff as summ_coeff,
-                '' as rank
+                '' as rank,
+                '' as rank_name
             FROM product_stats ps
             CROSS JOIN product_stats_averages osa
         );
@@ -163,16 +164,27 @@ def set_products_ranks(conn: duckdb.DuckDBPyConnection):
         UPDATE
             data_products_coeffs
         SET rank =
-            CASE
-                WHEN summ_coeff BETWEEN 0 AND 0.3 THEN '1'
-                WHEN summ_coeff BETWEEN 0.3 AND 1 THEN '2'
-                WHEN summ_coeff BETWEEN 1 AND 3 THEN '3'
-                WHEN summ_coeff BETWEEN 3 AND 7 THEN '4'
-                WHEN summ_coeff BETWEEN 7 AND 15 THEN '5'
-                WHEN summ_coeff BETWEEN 15 AND 50 THEN '6'
-                WHEN summ_coeff > 50 THEN '7'
-                ELSE ''
-            END
+                CASE
+                    WHEN summ_coeff BETWEEN 0 AND 0.3 THEN '1'
+                    WHEN summ_coeff BETWEEN 0.3 AND 1 THEN '2'
+                    WHEN summ_coeff BETWEEN 1 AND 3 THEN '3'
+                    WHEN summ_coeff BETWEEN 3 AND 7 THEN '4'
+                    WHEN summ_coeff BETWEEN 7 AND 15 THEN '5'
+                    WHEN summ_coeff BETWEEN 15 AND 50 THEN '6'
+                    WHEN summ_coeff > 50 THEN '7'
+                    ELSE ''
+                END,
+            rank_name = 
+                CASE
+                    WHEN summ_coeff BETWEEN 0 AND 0.3 THEN 'Т1'
+                    WHEN summ_coeff BETWEEN 0.3 AND 1 THEN 'Т1'
+                    WHEN summ_coeff BETWEEN 1 AND 3 THEN 'T2'
+                    WHEN summ_coeff BETWEEN 3 AND 7 THEN 'T5'
+                    WHEN summ_coeff BETWEEN 7 AND 15 THEN 'T10'
+                    WHEN summ_coeff BETWEEN 15 AND 50 THEN 'T50'
+                    WHEN summ_coeff > 50 THEN 'T50+'
+                    ELSE ''
+                END;
     """
     conn.execute(q)
 
@@ -187,6 +199,7 @@ def join_client_product_coeffs(conn: duckdb.DuckDBPyConnection):
                 d.group_id,
                 p.product_id,
                 p.rank,
+                p.rank_name,
                 COUNT(DISTINCT c.cluster_name) AS unique_cluster_count,
                 SUM(CASE WHEN c.cluster_name = '1 Разовые/низ чек' THEN 1 ELSE 0 END) as {clusters[0]},
                 SUM(CASE WHEN c.cluster_name = '2 Редкие/ низ чек' THEN 1 ELSE 0 END) as {clusters[1]},
@@ -198,7 +211,7 @@ def join_client_product_coeffs(conn: duckdb.DuckDBPyConnection):
             FROM data d
                 LEFT JOIN data_clients_coeffs c ON d."Id карты" = c.card_id
                 LEFT JOIN data_products_coeffs p ON d."Id номенклатуры в лояльности" = p.product_id
-            GROUP BY d.group_id, p.product_id, p.rank
+            GROUP BY d.group_id, p.product_id, p.rank, p.rank_name
         );
     """
     conn.execute(q)
@@ -404,6 +417,60 @@ def calc_sale_points_clients_segments(conn: duckdb.DuckDBPyConnection):
     conn.execute(q)
 
 
+def join_final_table(conn: duckdb.DuckDBPyConnection):
+    q = """
+        CREATE OR REPLACE TABLE final_data AS (
+            SELECT 
+                d."Id магазина в лояльности",
+                d."Структурная единица",
+                d."Город",
+                d."Площадь магазина",
+                d."Id карты",
+                d."Категория покупателей Qlik",
+                d."Пол",
+                d."Семейное положение",
+                d."Id чека",
+                d."Id номенклатуры в лояльности",
+                d."Товарная группа 1",
+                d."Товарная группа 2",
+                d."Товарная группа 3",
+                d.group_id as 'Ном мейп',
+                d."Номенклатура",
+                d."Commission",
+                d."Сумма",
+                d."Стоимость товара",
+                d."Кол-во товара",
+                c.cluster_name as 'Катег клиента',
+                dc.rank_name as 'Название группы ном',
+                dc.rank as 'Номер группы ном',
+                dc.unique_cluster_count as 'Попаданий в катег клиента',
+                dc.rank_cross as 'пересечения номер группы и пападания',
+                dc1.cluster1_rank as 'ранг_Редкие',
+                dc2.cluster2_rank as 'ранг_Ограниченные',
+                dc3.cluster3_rank as 'ранг_Умеренные',
+                dc4.cluster4_rank as 'ранг_Существенные',
+                dc5.cluster5_rank as 'ранг_Активные',
+                dc6.cluster6_rank as 'ранг_Частые',
+                cpc.price_segment as 'Клиенты по чеку',
+                ppc.price_segment as 'Номеклатура по цене за кг',
+            FROM data d
+                LEFT JOIN data_clients_coeffs c ON d."Id карты" = c.card_id
+                LEFT JOIN data_coeffs dc ON d."Id номенклатуры в лояльности" = dc.product_id
+                LEFT JOIN data_cluster1 dc1 ON d."Id номенклатуры в лояльности" = dc1.product_id
+                LEFT JOIN data_cluster2 dc2 ON d."Id номенклатуры в лояльности" = dc2.product_id
+                LEFT JOIN data_cluster3 dc3 ON d."Id номенклатуры в лояльности" = dc3.product_id
+                LEFT JOIN data_cluster4 dc4 ON d."Id номенклатуры в лояльности" = dc4.product_id
+                LEFT JOIN data_cluster5 dc5 ON d."Id номенклатуры в лояльности" = dc5.product_id
+                LEFT JOIN data_cluster6 dc6 ON d."Id номенклатуры в лояльности" = dc6.product_id
+                LEFT JOIN client_price_coeffs cpc on d."Id карты" = cpc.client_id
+                LEFT JOIN product_price_coeffs ppc on d."Id номенклатуры в лояльности" = ppc.product_id
+            WHERE "Id чека" IS NOT NULL AND "Id карты" IS NOT NULL AND "Id номенклатуры в лояльности" IS NOT NULL
+            ORDER BY "Id магазина в лояльности", "Id карты", "Id чека"
+        )
+    """
+    conn.execute(q)
+
+
 def save_data_to_csv(conn: duckdb.DuckDBPyConnection):
     if not os.path.exists('res'):
         os.mkdir('res')
@@ -415,6 +482,7 @@ def save_data_to_csv(conn: duckdb.DuckDBPyConnection):
         COPY product_price_coeffs TO 'res/output_products_price_coeffs.csv' (HEADER, DELIMITER ';');
         COPY client_price_coeffs TO 'res/output_clients_price_coeffs.csv' (HEADER, DELIMITER ';');
         COPY sale_points_segments TO 'res/output_sale_points_segments.csv' (HEADER, DELIMITER ';');
+        COPY final_data TO 'res/output_final_data.csv' (HEADER, DELIMITER ';');
     """
     conn.execute(q)
 
@@ -468,6 +536,9 @@ def main(load_files: bool):
 
     print('Calculating sale points clients segments...')
     calc_sale_points_clients_segments(conn)
+
+    print('Joining final data...')
+    join_final_table(conn)
 
     print('Saving data...')
     save_data_to_csv(conn)
