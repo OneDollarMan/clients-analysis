@@ -103,12 +103,13 @@ def set_clients_clusters(conn: duckdb.DuckDBPyConnection):
             data_clients_coeffs 
         SET cluster_name =
             CASE
+                WHEN group_coeff BETWEEN 0 AND 3 THEN '1 Разовые/низ чек'
                 WHEN group_coeff BETWEEN 3 AND 5 THEN '2 Редкие/ низ чек'
                 WHEN group_coeff BETWEEN 5 AND 7 THEN '3 Умеренные'
                 WHEN group_coeff BETWEEN 7 AND 10 THEN '4 Частые/ выс чек'
                 WHEN group_coeff BETWEEN 10 AND 20 THEN '5 Постоянные'
                 WHEN group_coeff > 20 THEN '6 Лояльные/ выс чек'
-                ELSE '1 Разовые/низ чек'
+                ELSE ''
             END
     """
     conn.execute(q)
@@ -160,13 +161,14 @@ def set_products_ranks(conn: duckdb.DuckDBPyConnection):
             data_products_coeffs
         SET rank =
             CASE
+                WHEN summ_coeff BETWEEN 0 AND 0.3 THEN '1'
                 WHEN summ_coeff BETWEEN 0.3 AND 1 THEN '2'
                 WHEN summ_coeff BETWEEN 1 AND 3 THEN '3'
                 WHEN summ_coeff BETWEEN 3 AND 7 THEN '4'
                 WHEN summ_coeff BETWEEN 7 AND 15 THEN '5'
                 WHEN summ_coeff BETWEEN 15 AND 50 THEN '6'
                 WHEN summ_coeff > 50 THEN '7'
-                ELSE '1'
+                ELSE ''
             END
     """
     conn.execute(q)
@@ -247,14 +249,15 @@ def set_product_cluster_ranks(conn: duckdb.DuckDBPyConnection):
                     data_{cluster}
                 SET {cluster}_rank =
                         CASE
+                            WHEN summ_cluster_coeff BETWEEN 0 AND 1 THEN '1'
                             WHEN summ_cluster_coeff BETWEEN 1 AND 2 THEN '2'
                             WHEN summ_cluster_coeff BETWEEN 2 AND 3 THEN '3'
                             WHEN summ_cluster_coeff BETWEEN 3 AND 5 THEN '4'
                             WHEN summ_cluster_coeff BETWEEN 5 AND 10 THEN '5'
                             WHEN summ_cluster_coeff BETWEEN 10 AND 50 THEN '6'
                             WHEN summ_cluster_coeff > 50 THEN '7'
-                            ELSE '1'
-                            END
+                            ELSE ''
+                        END
                 """
         conn.execute(q)
 
@@ -469,4 +472,4 @@ def main(load_files: bool):
 
 
 if __name__ == '__main__':
-    main(load_files=False)
+    main(load_files=True)
