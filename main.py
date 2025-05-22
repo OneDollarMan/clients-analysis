@@ -120,8 +120,10 @@ def calc_products_coefficients(conn: duckdb.DuckDBPyConnection):
         CREATE OR REPLACE TABLE data_products_coeffs AS (
             WITH overall_stats AS (
                 SELECT
+                    group_id,
                     COUNT(DISTINCT "Id чека") tx_count
                 FROM data
+                GROUP BY "group_id"
             ),
             product_stats AS (
                 SELECT
@@ -130,7 +132,8 @@ def calc_products_coefficients(conn: duckdb.DuckDBPyConnection):
                     COUNT(*) as freq,
                     freq / os.tx_count as hit_rate
                 FROM data
-                CROSS JOIN overall_stats AS os
+                LEFT JOIN overall_stats AS os USING(group_id)
+                WHERE "Id номенклатуры в лояльности" IS NOT NULL
                 GROUP BY group_id, "Id номенклатуры в лояльности", os.tx_count
             ),
             product_stats_averages AS (
@@ -144,8 +147,8 @@ def calc_products_coefficients(conn: duckdb.DuckDBPyConnection):
                 product_id,
                 freq,
                 hit_rate,
-                freq / osa.avg_freq as freq_coeff,
-                hit_rate / osa.avg_hit_rate as hit_rate_coeff,
+                2 * freq / osa.avg_freq as freq_coeff,
+                2 * hit_rate / osa.avg_hit_rate as hit_rate_coeff,
                 freq_coeff + hit_rate_coeff as summ_coeff,
                 '' as rank
             FROM product_stats ps
@@ -355,8 +358,8 @@ def calc_clients_by_price(conn: duckdb.DuckDBPyConnection):
                 SUM(CASE WHEN ppc.price_segment = 'Высокий' THEN 1 ELSE 0 END) / product_count as high_segment_share,
                 SUM(CASE WHEN ppc.price_segment = 'Максимальный' THEN 1 ELSE 0 END) / product_count as max_segment_share,
                 CASE
-                    WHEN low_segment_share > 0.3 THEN 'Низкий'
-                    WHEN high_segment_share + max_segment_share > 0.5 THEN 'Высокий'
+                    WHEN low_segment_share > 0.35 THEN 'Низкий'
+                    WHEN high_segment_share + max_segment_share > 0.35 THEN 'Высокий'
                     ELSE 'Средний'
                 END as price_segment
             FROM data d
@@ -472,4 +475,4 @@ def main(load_files: bool):
 
 
 if __name__ == '__main__':
-    main(load_files=True)
+    main(load_files=False)
