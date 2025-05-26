@@ -53,6 +53,7 @@ def get_all_data_joined(conn: duckdb.DuckDBPyConnection):
                 LEFT JOIN products p USING("Id номенклатуры в лояльности")
                 LEFT JOIN sale_points s USING("Id магазина в лояльности")
                 LEFT JOIN (SELECT "Id клиента" AS "Id карты", * FROM clients) c USING("Id карты")
+                LEFT JOIN (SELECT "тт" AS "Id магазина в лояльности", * FROM areas) a USING("Id магазина в лояльности")
     """
     conn.execute(q)
 
@@ -425,6 +426,7 @@ def join_final_table(conn: duckdb.DuckDBPyConnection):
                 d."Структурная единица",
                 d."Город",
                 d."Площадь магазина",
+                d."кластер ТТ площадь",
                 d."Id карты",
                 d."Категория покупателей Qlik",
                 d."Пол",
@@ -510,6 +512,9 @@ def main(load_files: bool):
         load_files_to_duckdb(
             paths=['static/references/sale_points.csv'], db_connection=conn, table_name="sale_points"
         )
+        load_files_to_duckdb(
+            paths=['static/references/areas.csv'], db_connection=conn, table_name="areas"
+        )
         print('Joining tables...')
         get_all_data_joined(conn)
 
@@ -547,4 +552,4 @@ def main(load_files: bool):
 
 
 if __name__ == '__main__':
-    main(load_files=False)
+    main(load_files=True)
